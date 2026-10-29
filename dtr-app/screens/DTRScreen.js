@@ -11,22 +11,16 @@ import { getDTRWeek, getDTRMonth } from '../api';
 dayjs.extend(customParseFormat);
 
 // ── Status thresholds (in hours) ────────────────────────────
-// UNDERTIME: 0 < hours < 8
-// COMPLETE : 8 <= hours < 9
-// OVERTIME : hours >= 9
-// ABSENT   : no in/out, or hours <= 0
 const STANDARD_HOURS = 8;
 const OVERTIME_HOURS = 9;
 
-// Legend colors
 const STATUS_COLOR = {
-  complete:  '#2e7d32', // green
-  overtime:  '#1565c0', // blue
-  undertime: '#ef6c00', // orange
-  absent:    '#9e9e9e', // grey
+  complete:  '#2e7d32',
+  overtime:  '#1565c0',
+  undertime: '#ef6c00',
+  absent:    '#9e9e9e',
 };
 
-// Row background tint
 const STATUS_BG = {
   complete:  '#e8f5e9',
   overtime:  '#e3f2fd',
@@ -36,31 +30,38 @@ const STATUS_BG = {
 
 const LEGEND_ORDER = ['complete', 'overtime', 'undertime', 'absent'];
 
-// Sunday-start week helpers
 const startOfSundayWeek = (d) => d.subtract(d.day(), 'day');
 const endOfSundayWeek   = (d) => d.add(6 - d.day(), 'day');
 
-// Convert "HH:mm:ss" → "h:mm A" using dayjs
 const fmtTime = (t) => {
   if (!t) return '—';
   const parsed = dayjs(t, ['HH:mm:ss', 'HH:mm', 'H:mm:ss', 'H:mm'], true);
   return parsed.isValid() ? parsed.format('h:mm A') : t;
 };
 
-// Derive one of: complete | overtime | undertime | absent
-//   ABSENT   : no valid in/out pair, or hours <= 0
-//   UNDERTIME: 0 < hours < 8
-//   COMPLETE : 8 <= hours < 9
-//   OVERTIME : hours >= 9
 const deriveStatus = (item) => {
   const hasIn  = !!item.in;
   const hasOut = !!item.out;
   const hrs    = Number(item.hours) || 0;
+  const isSunday = dayjs(item.date).day() === 0;
+
+  if (isSunday) {
+    if (hasIn || hasOut || hrs > 0) return 'overtime';
+    return null;
+  }
 
   if (!hasIn || !hasOut || hrs <= 0) return 'absent';
-  if (hrs >= OVERTIME_HOURS) return 'overtime';   // >= 9
-  if (hrs >= STANDARD_HOURS) return 'complete';   // 8 <= h < 9
-  return 'undertime';                             // 0 < h < 8
+  if (hrs >= OVERTIME_HOURS) return 'overtime';
+  if (hrs >= STANDARD_HOURS) return 'complete';
+  return 'undertime';
+};
+
+// Column flex weights — shared by BOTH header and body so they always line up
+const COL = {
+  date: 1.4,
+  in:   1,
+  out:  1,
+  hrs:  0.9,
 };
 
 export default function DTRScreen({ route }) {
@@ -136,10 +137,18 @@ export default function DTRScreen({ route }) {
           {!loading && data && (
             <DataTable style={{ marginHorizontal: 12 }}>
               <DataTable.Header>
-                <DataTable.Title>Date</DataTable.Title>
-                <DataTable.Title>In</DataTable.Title>
-                <DataTable.Title>Out</DataTable.Title>
-                <DataTable.Title numeric>Hrs</DataTable.Title>
+                <DataTable.Title style={[styles.colBase, { flex: COL.date }]}>
+                  <Text style={styles.headerText}>Date</Text>
+                </DataTable.Title>
+                <DataTable.Title style={[styles.colBase, { flex: COL.in }]}>
+                  <Text style={styles.headerText}>In</Text>
+                </DataTable.Title>
+                <DataTable.Title style={[styles.colBase, { flex: COL.out }]}>
+                  <Text style={styles.headerText}>Out</Text>
+                </DataTable.Title>
+                <DataTable.Title style={[styles.colBase, { flex: COL.hrs }]}>
+                  <Text style={styles.headerText}>Hrs</Text>
+                </DataTable.Title>
               </DataTable.Header>
             </DataTable>
           )}
@@ -147,33 +156,60 @@ export default function DTRScreen({ route }) {
       }
       renderItem={({ item }) => {
         const status = deriveStatus(item);
+        const isSunday = dayjs(item.date).day() === 0;
+
+        const rowBg = status
+          ? STATUS_BG[status]
+          : (isSunday ? '#fafafa' : 'transparent');
+        const borderColor = status
+          ? STATUS_COLOR[status]
+          : (isSunday ? '#e0e0e0' : 'transparent');
+
         return (
           <DataTable.Row
             style={{
               marginHorizontal: 12,
-              backgroundColor: STATUS_BG[status],
+              backgroundColor: rowBg,
               borderLeftWidth: 4,
-              borderLeftColor: STATUS_COLOR[status],
+              borderLeftColor: borderColor,
             }}
           >
-            <DataTable.Cell>
-              <View>
-                <Text>{dayjs(item.date).format('MMM D ddd')}</Text>
-                <Text
-                  style={{
-                    fontSize: 10,
-                    color: STATUS_COLOR[status],
-                    fontWeight: '600',
-                  }}
-                >
-                  {status.toUpperCase()}
+            <DataTable.Cell style={[styles.colBase, { flex: COL.date }]}>
+              <View style={styles.stack}>
+                <Text style={styles.cellText}>
+                  {dayjs(item.date).format('MMM D ddd')}
                 </Text>
+                {status ? (
+                  <Text
+                    style={[
+                      styles.cellText,
+                      { fontSize: 10, color: STATUS_COLOR[status], fontWeight: '600' },
+                    ]}
+                  >
+                    {status.toUpperCase()}
+                  </Text>
+                ) : isSunday ? (
+                  <Text
+                    style={[
+                      styles.cellText,
+                      { fontSize: 10, color: '#9e9e9e', fontWeight: '600' },
+                    ]}
+                  >
+                    REST DAY
+                  </Text>
+                ) : null}
               </View>
             </DataTable.Cell>
-            <DataTable.Cell>{fmtTime(item.in)}</DataTable.Cell>
-            <DataTable.Cell>{fmtTime(item.out)}</DataTable.Cell>
-            <DataTable.Cell numeric>
-              {item.hours > 0 ? item.hours : '—'}
+            <DataTable.Cell style={[styles.colBase, { flex: COL.in }]}>
+              <Text style={styles.cellText}>{fmtTime(item.in)}</Text>
+            </DataTable.Cell>
+            <DataTable.Cell style={[styles.colBase, { flex: COL.out }]}>
+              <Text style={styles.cellText}>{fmtTime(item.out)}</Text>
+            </DataTable.Cell>
+            <DataTable.Cell style={[styles.colBase, { flex: COL.hrs }]}>
+              <Text style={styles.cellText}>
+                {item.hours > 0 ? item.hours : '—'}
+              </Text>
             </DataTable.Cell>
           </DataTable.Row>
         );
@@ -216,5 +252,24 @@ const styles = StyleSheet.create({
     flex: 1,
     textAlign: 'center',
     fontSize: 13,
+  },
+  // Shared by header Title AND body Cell — same padding, same centering
+  colBase: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 0,   // kill RP's default asymmetric padding
+  },
+  headerText: {
+    textAlign: 'center',
+    width: '100%',
+  },
+  stack: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '100%',
+  },
+  cellText: {
+    textAlign: 'center',
+    width: '100%',
   },
 });
