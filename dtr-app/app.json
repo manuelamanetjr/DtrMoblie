@@ -14,6 +14,14 @@
           "backgroundColor": "#232323",
           "imageWidth": 200
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
       ]
     ],
     "ios": {
@@ -25,10 +33,16 @@
         "foregroundImage": "./assets/icon.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "package": "com.manuelamanetjr.dtrapp"
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ebf22034-d793-474a-89b1-8acb2e134db5"
+      }
     }
   }
 }
