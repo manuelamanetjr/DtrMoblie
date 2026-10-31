@@ -1,21 +1,24 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { View, FlatList, StyleSheet } from 'react-native';
+import { View, FlatList, StyleSheet, RefreshControl } from 'react-native';
 import {
   Searchbar, List, ActivityIndicator, Text, Avatar, Button, Chip,
+  IconButton,
 } from 'react-native-paper';
 import { getEmployees } from '../api';
 
 export default function EmployeePickerScreen({ navigation }) {
-  const [employees, setEmployees] = useState([]);
-  const [filtered, setFiltered]   = useState([]);
-  const [query, setQuery]         = useState('');
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState(null);
+  const [employees, setEmployees]   = useState([]);
+  const [filtered, setFiltered]     = useState([]);
+  const [query, setQuery]           = useState('');
+  const [loading, setLoading]       = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError]           = useState(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const load = useCallback((force = false) => {
+    if (!force) setLoading(true);
     setError(null);
-    getEmployees()
+
+    return getEmployees({ force })
       .then((data) => {
         setEmployees(data);
         setFiltered(data);
@@ -28,10 +31,13 @@ export default function EmployeePickerScreen({ navigation }) {
           'Could not load employees'
         );
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(false); }, [load]);
 
   useEffect(() => {
     const q = query.trim().toLowerCase();
@@ -46,6 +52,19 @@ export default function EmployeePickerScreen({ navigation }) {
       })
     );
   }, [query, employees]);
+
+  // Pull-to-refresh: bypass cache
+  const onRefresh = () => {
+    setRefreshing(true);
+    load(true);
+  };
+
+  // Header button: bypass cache (works even if list is empty)
+  const onForceRefreshPress = () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    load(true);
+  };
 
   // ── Loading ──
   if (loading) {
@@ -67,7 +86,7 @@ export default function EmployeePickerScreen({ navigation }) {
         <Text style={{ marginBottom: 16, color: '#666', textAlign: 'center' }}>
           {error}
         </Text>
-        <Button mode="contained" icon="refresh" onPress={load}>
+        <Button mode="contained" icon="refresh" onPress={() => load(true)}>
           Retry
         </Button>
       </View>
@@ -76,12 +95,21 @@ export default function EmployeePickerScreen({ navigation }) {
 
   return (
     <View style={{ flex: 1 }}>
-      <Searchbar
-        placeholder="Search name or employee #"
-        value={query}
-        onChangeText={setQuery}
-        style={{ margin: 12 }}
-      />
+      <View style={styles.searchRow}>
+        <Searchbar
+          placeholder="Search name or employee #"
+          value={query}
+          onChangeText={setQuery}
+          style={styles.searchbar}
+        />
+        <IconButton
+          icon="refresh"
+          size={24}
+          onPress={onForceRefreshPress}
+          disabled={refreshing}
+          accessibilityLabel="Force refresh employees"
+        />
+      </View>
 
       <View style={styles.countRow}>
         <Chip compact icon="account-multiple">
@@ -93,6 +121,9 @@ export default function EmployeePickerScreen({ navigation }) {
         data={filtered}
         keyExtractor={(item) => String(item.employee_number)}
         keyboardShouldPersistTaps="handled"
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
         ListEmptyComponent={
           <Text style={{ textAlign: 'center', marginTop: 24 }}>
             No matches
@@ -134,6 +165,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginTop: 12,
+  },
+  searchbar: {
+    flex: 1,
   },
   countRow: {
     paddingHorizontal: 12,

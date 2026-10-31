@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, FlatList, StyleSheet } from 'react-native';
+import { View, FlatList, StyleSheet, RefreshControl } from 'react-native';
 import {
   SegmentedButtons, Button, Card, Text, ActivityIndicator,
   DataTable, Chip, Divider,
@@ -10,7 +10,6 @@ import { getDTRWeek, getDTRMonth } from '../api';
 
 dayjs.extend(customParseFormat);
 
-// ── Status thresholds (in hours) ────────────────────────────
 const STANDARD_HOURS = 8;
 const OVERTIME_HOURS = 9;
 
@@ -20,14 +19,12 @@ const STATUS_COLOR = {
   undertime: '#ef6c00',
   absent:    '#9e9e9e',
 };
-
 const STATUS_BG = {
   complete:  '#e8f5e9',
   overtime:  '#e3f2fd',
   undertime: '#fff3e0',
   absent:    '#f5f5f5',
 };
-
 const LEGEND_ORDER = ['complete', 'overtime', 'undertime', 'absent'];
 
 const startOfSundayWeek = (d) => d.subtract(d.day(), 'day');
@@ -40,61 +37,151 @@ const fmtTime = (t) => {
 };
 
 const deriveStatus = (item) => {
+  const isSunday = dayjs(item.date).day() === 0;
   const hasIn  = !!item.in;
   const hasOut = !!item.out;
   const hrs    = Number(item.hours) || 0;
-  const isSunday = dayjs(item.date).day() === 0;
-
-  if (isSunday) {
-    if (hasIn || hasOut || hrs > 0) return 'overtime';
-    return null;
-  }
-
   if (!hasIn || !hasOut || hrs <= 0) return 'absent';
+  if (isSunday) return 'overtime';
   if (hrs >= OVERTIME_HOURS) return 'overtime';
   if (hrs >= STANDARD_HOURS) return 'complete';
   return 'undertime';
 };
 
-// Column flex weights — shared by BOTH header and body so they always line up
-const COL = {
-  date: 1.4,
-  in:   1,
-  out:  1,
-  hrs:  0.9,
-};
-
 export default function DTRScreen({ route }) {
   const { employee } = route.params;
-  const [mode, setMode]     = useState('week');
-  const [anchor, setAnchor] = useState(dayjs());
-  const [data, setData]     = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [mode, setMode]           = useState('week');
+  const [anchor, setAnchor]       = useState(dayjs());
+  const [data, setData]           = useState(null);
+  const [loading, setLoading]     = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    const p = mode === 'week'
-      ? getDTRWeek(employee.employee_number, anchor.format('YYYY-MM-DD'))
-      : getDTRMonth(employee.employee_number, anchor.year(), anchor.month() + 1);
-    p.then(setData).finally(() => setLoading(false));
-  }, [mode, anchor, employee.employee_number]);
+  const load = useCallback(
+    (force = false) => {
+      if (!force) setLoading(true);
+      const fn = mode === 'week'
+        ? getDTRWeek(employee.employee_number, anchor.format('YYYY-MM-DD'), { force })
+        : getDTRMonth(employee.employee_number, anchor.year(), anchor.month() + 1, { force });
 
-  useEffect(() => { load(); }, [load]);
+      return fn
+        .then(setData)
+        .catch((err) => console.warn('[DTRScreen]', err?.message))
+        .finally(() => {
+          setLoading(false);
+          setRefreshing(false);
+        });
+    },
+    [mode, anchor, employee.employee_number]
+  );
+
+  useEffect(() => { load(false); }, [load]);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    load(true);
+  };
 
   const shift = (delta) =>
-    setAnchor(a => (mode === 'week' ? a.add(delta, 'week') : a.add(delta, 'month')));
+    setAnchor((a) => (mode === 'week' ? a.add(delta, 'week') : a.add(delta, 'month')));
+
+  const renderTable = () => {
+    if (loading || !data) return null;
+    return (
+      <View style={styles.tableWrap}>
+        <DataTable>
+          <DataTable.Header>
+            <DataTable.Title style={[styles.colDate, styles.centerTitle]}>
+              Date
+            </DataTable.Title>
+            <DataTable.Title style={[styles.colIn, styles.centerTitle]}>
+              In
+            </DataTable.Title>
+            <DataTable.Title style={[styles.colOut, styles.centerTitle]}>
+              Out
+            </DataTable.Title>
+            <DataTable.Title style={[styles.colHrs, styles.centerTitle]}>
+              Hrs
+            </DataTable.Title>
+          </DataTable.Header>
+
+          {data.days.map((item) => {
+            const status = deriveStatus(item);
+            return (
+              <DataTable.Row
+                key={item.date}
+                style={[
+                  styles.row,
+                  {
+                    backgroundColor: STATUS_BG[status],
+                    borderLeftColor: STATUS_COLOR[status],
+                  },
+                ]}
+              >
+                <DataTable.Cell style={[styles.colDate, styles.centerCell]}>
+                  <View style={{ alignItems: 'center' }}>
+                    <Text>{dayjs(item.date).format('MMM D ddd')}</Text>
+                    <Text
+                      style={{
+                        fontSize: 10,
+                        color: STATUS_COLOR[status],
+                        fontWeight: '600',
+                      }}
+                    >
+                      {status.toUpperCase()}
+                    </Text>
+                  </View>
+                </DataTable.Cell>
+                <DataTable.Cell style={[styles.colIn, styles.centerCell]}>
+                  {fmtTime(item.in)}
+                </DataTable.Cell>
+                <DataTable.Cell style={[styles.colOut, styles.centerCell]}>
+                  {fmtTime(item.out)}
+                </DataTable.Cell>
+                <DataTable.Cell style={[styles.colHrs, styles.centerCell]}>
+                  {item.hours > 0 ? item.hours : '—'}
+                </DataTable.Cell>
+              </DataTable.Row>
+            );
+          })}
+        </DataTable>
+
+        <View style={{ padding: 12 }}>
+          <Divider />
+          <Text style={{ marginTop: 12, marginBottom: 6, fontSize: 12, color: '#666' }}>
+            LEGEND
+          </Text>
+          <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+            {LEGEND_ORDER.map((s) => (
+              <Chip
+                key={s}
+                compact
+                textStyle={{ color: '#fff', fontSize: 11 }}
+                style={{ backgroundColor: STATUS_COLOR[s] }}
+              >
+                {s.toUpperCase()}
+              </Chip>
+            ))}
+          </View>
+        </View>
+      </View>
+    );
+  };
 
   return (
     <FlatList
       style={{ flex: 1 }}
-      data={data?.days ?? []}
-      keyExtractor={d => d.date}
+      data={[null]}
+      keyExtractor={() => 'top'}
+      renderItem={() => null}
+      refreshControl={
+        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+      }
       ListHeaderComponent={
         <>
           <Card style={{ margin: 12 }}>
             <Card.Title
               title={`${employee.last.toUpperCase()}, ${employee.first}`}
-              subtitle={`#${employee.employee_number} • ${employee.company}`}
+              subtitle={`#${employee.employee_number}`}
             />
           </Card>
 
@@ -134,107 +221,8 @@ export default function DTRScreen({ route }) {
             </Card>
           )}
 
-          {!loading && data && (
-            <DataTable style={{ marginHorizontal: 12 }}>
-              <DataTable.Header>
-                <DataTable.Title style={[styles.colBase, { flex: COL.date }]}>
-                  <Text style={styles.headerText}>Date</Text>
-                </DataTable.Title>
-                <DataTable.Title style={[styles.colBase, { flex: COL.in }]}>
-                  <Text style={styles.headerText}>In</Text>
-                </DataTable.Title>
-                <DataTable.Title style={[styles.colBase, { flex: COL.out }]}>
-                  <Text style={styles.headerText}>Out</Text>
-                </DataTable.Title>
-                <DataTable.Title style={[styles.colBase, { flex: COL.hrs }]}>
-                  <Text style={styles.headerText}>Hrs</Text>
-                </DataTable.Title>
-              </DataTable.Header>
-            </DataTable>
-          )}
+          {renderTable()}
         </>
-      }
-      renderItem={({ item }) => {
-        const status = deriveStatus(item);
-        const isSunday = dayjs(item.date).day() === 0;
-
-        const rowBg = status
-          ? STATUS_BG[status]
-          : (isSunday ? '#fafafa' : 'transparent');
-        const borderColor = status
-          ? STATUS_COLOR[status]
-          : (isSunday ? '#e0e0e0' : 'transparent');
-
-        return (
-          <DataTable.Row
-            style={{
-              marginHorizontal: 12,
-              backgroundColor: rowBg,
-              borderLeftWidth: 4,
-              borderLeftColor: borderColor,
-            }}
-          >
-            <DataTable.Cell style={[styles.colBase, { flex: COL.date }]}>
-              <View style={styles.stack}>
-                <Text style={styles.cellText}>
-                  {dayjs(item.date).format('MMM D ddd')}
-                </Text>
-                {status ? (
-                  <Text
-                    style={[
-                      styles.cellText,
-                      { fontSize: 10, color: STATUS_COLOR[status], fontWeight: '600' },
-                    ]}
-                  >
-                    {status.toUpperCase()}
-                  </Text>
-                ) : isSunday ? (
-                  <Text
-                    style={[
-                      styles.cellText,
-                      { fontSize: 10, color: '#9e9e9e', fontWeight: '600' },
-                    ]}
-                  >
-                    REST DAY
-                  </Text>
-                ) : null}
-              </View>
-            </DataTable.Cell>
-            <DataTable.Cell style={[styles.colBase, { flex: COL.in }]}>
-              <Text style={styles.cellText}>{fmtTime(item.in)}</Text>
-            </DataTable.Cell>
-            <DataTable.Cell style={[styles.colBase, { flex: COL.out }]}>
-              <Text style={styles.cellText}>{fmtTime(item.out)}</Text>
-            </DataTable.Cell>
-            <DataTable.Cell style={[styles.colBase, { flex: COL.hrs }]}>
-              <Text style={styles.cellText}>
-                {item.hours > 0 ? item.hours : '—'}
-              </Text>
-            </DataTable.Cell>
-          </DataTable.Row>
-        );
-      }}
-      ListFooterComponent={
-        !loading && data && (
-          <View style={{ padding: 12 }}>
-            <Divider />
-            <Text style={{ marginTop: 12, marginBottom: 6, fontSize: 12, color: '#666' }}>
-              LEGEND
-            </Text>
-            <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-              {LEGEND_ORDER.map(s => (
-                <Chip
-                  key={s}
-                  compact
-                  textStyle={{ color: '#fff', fontSize: 11 }}
-                  style={{ backgroundColor: STATUS_COLOR[s] }}
-                >
-                  {s.toUpperCase()}
-                </Chip>
-              ))}
-            </View>
-          </View>
-        )
       }
     />
   );
@@ -248,28 +236,33 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
     paddingVertical: 8,
   },
-  rangeLabel: {
-    flex: 1,
-    textAlign: 'center',
-    fontSize: 13,
+  rangeLabel: { flex: 1, textAlign: 'center', fontSize: 13 },
+
+  tableWrap: {
+    marginHorizontal: 12,
+    marginBottom: 12,
   },
-  // Shared by header Title AND body Cell — same padding, same centering
-  colBase: {
+  row: {
+    borderLeftWidth: 4,
+  },
+
+  // Column widths (unchanged — keep alignment)
+  colDate: { flex: 2 },
+  colIn:   { flex: 1.4 },
+  colOut:  { flex: 1.4 },
+  colHrs:  { flex: 1 },
+
+  // Center titles inside their column
+  centerTitle: {
     justifyContent: 'center',
     alignItems: 'center',
-    paddingHorizontal: 0,   // kill RP's default asymmetric padding
   },
-  headerText: {
-    textAlign: 'center',
-    width: '100%',
-  },
-  stack: {
-    alignItems: 'center',
+
+  // Center cell content; for numeric cells (Hrs) this still works because
+  // we removed the `numeric` prop from the Hrs column so it behaves like
+  // the others and can be centered uniformly.
+  centerCell: {
     justifyContent: 'center',
-    width: '100%',
-  },
-  cellText: {
-    textAlign: 'center',
-    width: '100%',
+    alignItems: 'center',
   },
 });
