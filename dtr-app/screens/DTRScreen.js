@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, FlatList, StyleSheet, RefreshControl, Pressable } from 'react-native';
+import { View, FlatList, StyleSheet, RefreshControl, Pressable, Alert } from 'react-native';
 import {
   SegmentedButtons,
   Button,
@@ -15,6 +15,9 @@ import { DatePickerModal } from 'react-native-paper-dates';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { getDTRWeek, getDTRMonth, getDTRRange } from '../api';
+import * as XLSX from 'xlsx';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 
 dayjs.extend(customParseFormat);
 
@@ -56,12 +59,56 @@ const deriveStatus = (item) => {
   return 'undertime';
 };
 
+// ── Excel builder ───────────────────────────────────────────
+// Layout (matches sample picture):
+//   Row 1 (headers, repeated): DATE | IN | OUT | DATE | IN | OUT | DATE | IN | OUT
+//   Rows 2..N: chunk the daily entries into groups of 3 side-by-side
+function buildExportWorkbook(days, employee, range) {
+  // Order days chronologically (they already come sorted from the API)
+  const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+
+  const header = [
+    'DATE', 'IN', 'OUT',
+    'DATE', 'IN', 'OUT',
+    'DATE', 'IN', 'OUT',
+  ];
+
+  const rows = [];
+  for (let i = 0; i < sorted.length; i += 3) {
+    const chunk = sorted.slice(i, i + 3);
+    const row = [];
+    for (const d of chunk) {
+      // Match the picture style: "15-Jun-26" for the date
+      row.push(dayjs(d.date).format('DD-MMM-YY'));
+      row.push(d.in ? d.in : '');
+      row.push(d.out ? d.out : '');
+    }
+    // Pad to 9 columns so every row has the same shape
+    while (row.length < 9) row.push('');
+    rows.push(row);
+  }
+
+  const aoa = [header, ...rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Column widths — DATE a bit wider, IN/OUT medium
+  ws['!cols'] = [
+    { wch: 12 }, { wch: 10 }, { wch: 10 },
+    { wch: 12 }, { wch: 10 }, { wch: 10 },
+    { wch: 12 }, { wch: 10 }, { wch: 10 },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'DTR');
+
+  return wb;
+}
+
 export default function DTRScreen({ route }) {
   const { employee } = route.params;
 
   const [mode, setMode] = useState('week');
   const [anchor, setAnchor] = useState(dayjs());
-  // Custom range state (used only when mode === 'range')
   const [range, setRange] = useState({
     start: dayjs().startOf('month'),
     end: dayjs(),
@@ -70,9 +117,10 @@ export default function DTRScreen({ route }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
-  const [pickerOpen, setPickerOpen] = useState(false);       // week/month single-date
-  const [rangePickerOpen, setRangePickerOpen] = useState(false); // range
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [rangePickerOpen, setRangePickerOpen] = useState(false);
 
   const load = useCallback(
     (force = false) => {
@@ -114,7 +162,6 @@ export default function DTRScreen({ route }) {
 
   const shift = (delta) => {
     if (mode === 'range') {
-      // Shift the whole range by its own length (day-wise)
       const days = range.end.diff(range.start, 'day') + 1;
       setRange({
         start: range.start.add(delta * days, 'day'),
@@ -125,7 +172,6 @@ export default function DTRScreen({ route }) {
     setAnchor((a) => (mode === 'week' ? a.add(delta, 'week') : a.add(delta, 'month')));
   };
 
-  // ── Picker confirm handlers ──────────────────────────────
   const onConfirmSingleDate = (params) => {
     setPickerOpen(false);
     if (!params?.date) return;
@@ -151,7 +197,46 @@ export default function DTRScreen({ route }) {
     else setPickerOpen(true);
   };
 
-  // ── Range label ─────────────────────────────────────────
+  // ── Export handler ────────────────────────────────────────
+  const onExport = async () => {
+    if (!data?.days?.length) {
+      Alert.alert('Nothing to export', 'No DTR data for this range.');
+      return;
+    }
+    try {
+      setExporting(true);
+
+      const wb = buildExportWorkbook(data.days, employee, data.range);
+
+      // SheetJS writes an array buffer in RN (no fs available by default)
+      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+
+      const safeName = `${employee.last}_${employee.first}_${data.range.start}_to_${data.range.end}`
+        .replace(/[^a-z0-9_\-]/gi, '_');
+      const fileUri = FileSystem.documentDirectory + `${safeName}.xlsx`;
+
+      await FileSystem.writeAsStringAsync(fileUri, wbout, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType:
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: 'Export DTR',
+          UTI: 'com.microsoft.excel.xlsx',
+        });
+      } else {
+        Alert.alert('Saved', `File saved to:\n${fileUri}`);
+      }
+    } catch (err) {
+      console.warn('[Export]', err);
+      Alert.alert('Export failed', err?.message ?? 'Unknown error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const rangeLabel = (() => {
     if (mode === 'week') {
       return `${startOfSundayWeek(anchor).format('MMM D, YYYY')} – ${endOfSundayWeek(anchor).format('MMM D, YYYY')}`;
@@ -168,18 +253,10 @@ export default function DTRScreen({ route }) {
       <View style={styles.tableWrap}>
         <DataTable>
           <DataTable.Header>
-            <DataTable.Title style={[styles.colDate, styles.centerTitle]}>
-              Date
-            </DataTable.Title>
-            <DataTable.Title style={[styles.colIn, styles.centerTitle]}>
-              In
-            </DataTable.Title>
-            <DataTable.Title style={[styles.colOut, styles.centerTitle]}>
-              Out
-            </DataTable.Title>
-            <DataTable.Title style={[styles.colHrs, styles.centerTitle]}>
-              Hrs
-            </DataTable.Title>
+            <DataTable.Title style={[styles.colDate, styles.centerTitle]}>Date</DataTable.Title>
+            <DataTable.Title style={[styles.colIn, styles.centerTitle]}>In</DataTable.Title>
+            <DataTable.Title style={[styles.colOut, styles.centerTitle]}>Out</DataTable.Title>
+            <DataTable.Title style={[styles.colHrs, styles.centerTitle]}>Hrs</DataTable.Title>
           </DataTable.Header>
 
           {data.days.map((item) => {
@@ -198,23 +275,13 @@ export default function DTRScreen({ route }) {
                 <DataTable.Cell style={[styles.colDate, styles.centerCell]}>
                   <View style={{ alignItems: 'center' }}>
                     <Text>{dayjs(item.date).format('MMM D ddd')}</Text>
-                    <Text
-                      style={{
-                        fontSize: 10,
-                        color: STATUS_COLOR[status],
-                        fontWeight: '600',
-                      }}
-                    >
+                    <Text style={{ fontSize: 10, color: STATUS_COLOR[status], fontWeight: '600' }}>
                       {status.toUpperCase()}
                     </Text>
                   </View>
                 </DataTable.Cell>
-                <DataTable.Cell style={[styles.colIn, styles.centerCell]}>
-                  {fmtTime(item.in)}
-                </DataTable.Cell>
-                <DataTable.Cell style={[styles.colOut, styles.centerCell]}>
-                  {fmtTime(item.out)}
-                </DataTable.Cell>
+                <DataTable.Cell style={[styles.colIn, styles.centerCell]}>{fmtTime(item.in)}</DataTable.Cell>
+                <DataTable.Cell style={[styles.colOut, styles.centerCell]}>{fmtTime(item.out)}</DataTable.Cell>
                 <DataTable.Cell style={[styles.colHrs, styles.centerCell]}>
                   {item.hours > 0 ? item.hours : '—'}
                 </DataTable.Cell>
@@ -225,9 +292,7 @@ export default function DTRScreen({ route }) {
 
         <View style={{ padding: 12 }}>
           <Divider />
-          <Text style={{ marginTop: 12, marginBottom: 6, fontSize: 12, color: '#666' }}>
-            LEGEND
-          </Text>
+          <Text style={{ marginTop: 12, marginBottom: 6, fontSize: 12, color: '#666' }}>LEGEND</Text>
           <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
             {LEGEND_ORDER.map((s) => (
               <Chip
@@ -251,9 +316,7 @@ export default function DTRScreen({ route }) {
       data={[null]}
       keyExtractor={() => 'top'}
       renderItem={() => null}
-      refreshControl={
-        <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
-      }
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       ListHeaderComponent={
         <>
           <Card style={{ margin: 12 }}>
@@ -275,9 +338,7 @@ export default function DTRScreen({ route }) {
           />
 
           <View style={styles.navRow}>
-            <Button icon="chevron-left" onPress={() => shift(-1)}>
-              Prev
-            </Button>
+            <Button icon="chevron-left" onPress={() => shift(-1)}>Prev</Button>
 
             <Pressable
               onPress={openPicker}
@@ -289,12 +350,23 @@ export default function DTRScreen({ route }) {
               <IconButton icon="calendar" size={18} style={{ margin: 0 }} />
             </Pressable>
 
-            <Button icon="chevron-right" onPress={() => shift(1)}>
-              Next
-            </Button>
+            <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
           </View>
 
-          {/* Single-date modal (week / month) */}
+          {/* ── Export button (range mode only) ─────────────── */}
+          {mode === 'range' && (
+            <Button
+              mode="contained"
+              icon="file-excel"
+              onPress={onExport}
+              loading={exporting}
+              disabled={exporting || loading || !data}
+              style={{ marginHorizontal: 12, marginTop: 4, marginBottom: 4 }}
+            >
+              Export to Excel
+            </Button>
+          )}
+
           <DatePickerModal
             locale="en"
             mode="single"
@@ -306,7 +378,6 @@ export default function DTRScreen({ route }) {
             label={mode === 'week' ? 'Pick any day in the week' : 'Pick any day in the month'}
           />
 
-          {/* Range modal (range) */}
           <DatePickerModal
             locale="en"
             mode="range"
@@ -327,9 +398,7 @@ export default function DTRScreen({ route }) {
             <Card style={{ margin: 12 }}>
               <Card.Content>
                 <Text variant="labelMedium">TOTAL HOURS</Text>
-                <Text variant="displaySmall" style={{ fontWeight: '700' }}>
-                  {data.total_hours}
-                </Text>
+                <Text variant="displaySmall" style={{ fontWeight: '700' }}>{data.total_hours}</Text>
                 <Text variant="bodySmall" style={{ marginTop: 4 }}>
                   {data.range.start} to {data.range.end}
                 </Text>
