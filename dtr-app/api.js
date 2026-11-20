@@ -8,7 +8,7 @@ import {
 // ──────────────────────────────────────────────────────────────
 // Replace 192.168.1.20 with your PC's LAN IP.
 // ──────────────────────────────────────────────────────────────
-export const BASE_URL = 'http://192.168.44.113:3000/api';
+export const BASE_URL = 'http://192.168.44.200:3000/api';
 
 // Cache lifetimes per endpoint
 const EMPLOYEES_TTL = 10 * 60 * 1000; // employee list rarely changes
