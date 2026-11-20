@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, FlatList, StyleSheet, RefreshControl, Pressable, Alert } from 'react-native';
+import { View, FlatList, StyleSheet, RefreshControl, Pressable, Alert, Platform } from 'react-native';
 import {
   SegmentedButtons,
   Button,
@@ -16,8 +16,10 @@ import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { getDTRWeek, getDTRMonth, getDTRRange } from '../api';
 import * as XLSX from 'xlsx';
-import * as FileSystem from 'expo-file-system/legacy';
+import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+// ✅ FIX: StorageAccessFramework lives in the legacy module
+import * as FileSystemLegacy from 'expo-file-system/legacy';
 
 dayjs.extend(customParseFormat);
 
@@ -60,30 +62,19 @@ const deriveStatus = (item) => {
 };
 
 // ── Excel builder ───────────────────────────────────────────
-// Layout (matches sample picture):
-//   Row 1 (headers, repeated): DATE | IN | OUT | DATE | IN | OUT | DATE | IN | OUT
-//   Rows 2..N: chunk the daily entries into groups of 3 side-by-side
 function buildExportWorkbook(days, employee, range) {
-  // Order days chronologically (they already come sorted from the API)
   const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
-
-  const header = [
-    'DATE', 'IN', 'OUT',
-    'DATE', 'IN', 'OUT',
-    'DATE', 'IN', 'OUT',
-  ];
-
+  const header = ['DATE', 'IN', 'OUT', 'DATE', 'IN', 'OUT', 'DATE', 'IN', 'OUT'];
   const rows = [];
+
   for (let i = 0; i < sorted.length; i += 3) {
     const chunk = sorted.slice(i, i + 3);
     const row = [];
     for (const d of chunk) {
-      // Match the picture style: "15-Jun-26" for the date
       row.push(dayjs(d.date).format('DD-MMM-YY'));
       row.push(d.in ? d.in : '');
       row.push(d.out ? d.out : '');
     }
-    // Pad to 9 columns so every row has the same shape
     while (row.length < 9) row.push('');
     rows.push(row);
   }
@@ -91,7 +82,6 @@ function buildExportWorkbook(days, employee, range) {
   const aoa = [header, ...rows];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-  // Column widths — DATE a bit wider, IN/OUT medium
   ws['!cols'] = [
     { wch: 12 }, { wch: 10 }, { wch: 10 },
     { wch: 12 }, { wch: 10 }, { wch: 10 },
@@ -100,7 +90,6 @@ function buildExportWorkbook(days, employee, range) {
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'DTR');
-
   return wb;
 }
 
@@ -197,41 +186,97 @@ export default function DTRScreen({ route }) {
     else setPickerOpen(true);
   };
 
-  // ── Export handler ────────────────────────────────────────
-  const onExport = async () => {
+  // ── Excel Generation Helper ───────────────────────────────
+  const generateExcelFile = () => {
     if (!data?.days?.length) {
       Alert.alert('Nothing to export', 'No DTR data for this range.');
-      return;
+      return null;
     }
+    const wb = buildExportWorkbook(data.days, employee, data.range);
+    const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
+    
+    const safeName = `${employee.last}_${employee.first}_${data.range.start}_to_${data.range.end}`
+      .replace(/[^a-z0-9_\-]/gi, '_');
+      
+    const file = new File(Paths.document, `${safeName}.xlsx`);
+    file.write(wbout, { encoding: 'base64' });
+    
+    return file;
+  };
+
+  // ── Share Handler ─────────────────────────────────────────
+  const onShare = async () => {
     try {
       setExporting(true);
-
-      const wb = buildExportWorkbook(data.days, employee, data.range);
-
-      // SheetJS writes an array buffer in RN (no fs available by default)
-      const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
-
-      const safeName = `${employee.last}_${employee.first}_${data.range.start}_to_${data.range.end}`
-        .replace(/[^a-z0-9_\-]/gi, '_');
-      const fileUri = FileSystem.documentDirectory + `${safeName}.xlsx`;
-
-      await FileSystem.writeAsStringAsync(fileUri, wbout, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+      const file = generateExcelFile();
+      if (!file) return;
 
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(fileUri, {
-          mimeType:
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          dialogTitle: 'Export DTR',
+        await Sharing.shareAsync(file.uri, {
+          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          dialogTitle: 'Share DTR',
           UTI: 'com.microsoft.excel.xlsx',
         });
       } else {
-        Alert.alert('Saved', `File saved to:\n${fileUri}`);
+        Alert.alert('Error', 'Sharing is not available on this device.');
       }
     } catch (err) {
-      console.warn('[Export]', err);
-      Alert.alert('Export failed', err?.message ?? 'Unknown error');
+      console.warn('[Share]', err);
+      Alert.alert('Share failed', err?.message ?? 'Unknown error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // ── Download Handler (Uses legacy SAF) ────────────────────
+  const onDownload = async () => {
+    if (Platform.OS !== 'android') {
+      Alert.alert(
+        'Not Supported',
+        'Direct download is only available on Android. Use the Share button to save the file on iOS.'
+      );
+      return;
+    }
+
+    try {
+      setExporting(true);
+      const file = generateExcelFile();
+      if (!file) return;
+
+      const SAF = FileSystemLegacy.StorageAccessFramework;
+
+      // 1. Ask user for a directory (Shows system folder picker)
+      const permissions = await SAF.requestDirectoryPermissionsAsync(
+        SAF.getUriForDirectoryInRoot('Download')
+      );
+
+      if (!permissions.granted) {
+        return;
+      }
+
+      // 2. Create the file in the chosen directory
+      const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const fileUri = await SAF.createFileAsync(
+        permissions.directoryUri,
+        file.name,
+        mimeType
+      );
+
+      // 3. Read the generated base64 content from the temp file
+      const base64Content = await file.base64();
+
+      // 4. Write the content to the chosen destination
+      await SAF.writeAsStringAsync(fileUri, base64Content, {
+        encoding: FileSystemLegacy.EncodingType.Base64,
+      });
+
+      Alert.alert('Success', 'File saved successfully.');
+    } catch (err) {
+      if (err?.message?.includes('canceled')) {
+        return;
+      }
+      console.warn('[Download]', err);
+      Alert.alert('Download failed', err?.message ?? 'Unknown error');
     } finally {
       setExporting(false);
     }
@@ -353,18 +398,30 @@ export default function DTRScreen({ route }) {
             <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
           </View>
 
-          {/* ── Export button (range mode only) ─────────────── */}
+          {/* ── Action Buttons (range mode only) ────────────── */}
           {mode === 'range' && (
-            <Button
-              mode="contained"
-              icon="file-excel"
-              onPress={onExport}
-              loading={exporting}
-              disabled={exporting || loading || !data}
-              style={{ marginHorizontal: 12, marginTop: 4, marginBottom: 4 }}
-            >
-              Export to Excel
-            </Button>
+            <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 4, marginBottom: 4, gap: 8 }}>
+              <Button
+                mode="outlined"
+                icon="share-variant"
+                onPress={onShare}
+                loading={exporting}
+                disabled={exporting || loading || !data}
+                style={{ flex: 1 }}
+              >
+                Share
+              </Button>
+              <Button
+                mode="contained"
+                icon="download"
+                onPress={onDownload}
+                loading={exporting}
+                disabled={exporting || loading || !data}
+                style={{ flex: 1 }}
+              >
+                Download
+              </Button>
+            </View>
           )}
 
           <DatePickerModal
