@@ -5,14 +5,10 @@ import {
   DEFAULT_TTL_MS,
 } from './cache';
 
-// ──────────────────────────────────────────────────────────────
-// Replace 192.168.1.20 with your PC's LAN IP.
-// ──────────────────────────────────────────────────────────────
 export const BASE_URL = 'http://192.168.44.200:3000/api';
 
-// Cache lifetimes per endpoint
-const EMPLOYEES_TTL = 10 * 60 * 1000; // employee list rarely changes
-const DTR_TTL       = DEFAULT_TTL_MS; // 5 min for DTR periods
+const EMPLOYEES_TTL = 10 * 60 * 1000;
+const DTR_TTL       = DEFAULT_TTL_MS;
 
 const http = axios.create({
   baseURL: BASE_URL,
@@ -22,12 +18,10 @@ const http = axios.create({
 // ─── Employees ───────────────────────────────────────────────
 export async function getEmployees({ force = false } = {}) {
   const key = 'employees';
-
   if (!force) {
     const cached = await getCached(key, EMPLOYEES_TTL);
     if (cached) return cached;
   }
-
   return dedupe(key, async () => {
     const { data } = await http.get('/employees');
     await setCached(key, data);
@@ -35,10 +29,11 @@ export async function getEmployees({ force = false } = {}) {
   });
 }
 
-// ─── DTR (week/month) ────────────────────────────────────────
+// ─── DTR ────────────────────────────────────────────────────
 function periodKey(mode, employee_number, params) {
   if (mode === 'week')  return `dtr:week:${employee_number}:${params.date}`;
   if (mode === 'month') return `dtr:month:${employee_number}:${params.year}-${params.month}`;
+  if (mode === 'range') return `dtr:range:${employee_number}:${params.start}:${params.end}`;
   return `dtr:${mode}:${employee_number}:${JSON.stringify(params)}`;
 }
 
@@ -66,20 +61,19 @@ export function getDTRMonth(employee_number, year, month, { force = false } = {}
   return fetchDTR(key, '/dtr', params, DTR_TTL, force);
 }
 
-// ─── Explicit cache invalidation ────────────────────────────
-// Call this after you know the backend DB changed.
-export async function invalidateDTR(employee_number) {
-  // Simpler: nuke everything for this employee.
-  // (If you prefer surgical, build a key list — but the DTR key space
-  // is unbounded, so targeted wipe is fine for a mobile app.)
-  await invalidateAll();
-  // The next request will refetch.
+export function getDTRRange(employee_number, start, end, { force = false } = {}) {
+  const params = { mode: 'range', employee_number, start, end };
+  const key = periodKey('range', employee_number, params);
+  return fetchDTR(key, '/dtr', params, DTR_TTL, force);
 }
 
+// ─── Invalidation ──────────────────────────────────────────
+export async function invalidateDTR() {
+  await invalidateAll();
+}
 export async function invalidateEmployees() {
   await invalidate('employees');
 }
-
 export async function clearAllCache() {
   await invalidateAll();
 }

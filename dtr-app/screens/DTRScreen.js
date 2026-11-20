@@ -1,12 +1,20 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, FlatList, StyleSheet, RefreshControl } from 'react-native';
+import { View, FlatList, StyleSheet, RefreshControl, Pressable } from 'react-native';
 import {
-  SegmentedButtons, Button, Card, Text, ActivityIndicator,
-  DataTable, Chip, Divider,
+  SegmentedButtons,
+  Button,
+  Card,
+  Text,
+  ActivityIndicator,
+  DataTable,
+  Chip,
+  Divider,
+  IconButton,
 } from 'react-native-paper';
+import { DatePickerModal } from 'react-native-paper-dates';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
-import { getDTRWeek, getDTRMonth } from '../api';
+import { getDTRWeek, getDTRMonth, getDTRRange } from '../api';
 
 dayjs.extend(customParseFormat);
 
@@ -14,21 +22,21 @@ const STANDARD_HOURS = 8;
 const OVERTIME_HOURS = 9;
 
 const STATUS_COLOR = {
-  complete:  '#2e7d32',
-  overtime:  '#1565c0',
+  complete: '#2e7d32',
+  overtime: '#1565c0',
   undertime: '#ef6c00',
-  absent:    '#9e9e9e',
+  absent: '#9e9e9e',
 };
 const STATUS_BG = {
-  complete:  '#e8f5e9',
-  overtime:  '#e3f2fd',
+  complete: '#e8f5e9',
+  overtime: '#e3f2fd',
   undertime: '#fff3e0',
-  absent:    '#f5f5f5',
+  absent: '#f5f5f5',
 };
 const LEGEND_ORDER = ['complete', 'overtime', 'undertime', 'absent'];
 
 const startOfSundayWeek = (d) => d.subtract(d.day(), 'day');
-const endOfSundayWeek   = (d) => d.add(6 - d.day(), 'day');
+const endOfSundayWeek = (d) => d.add(6 - d.day(), 'day');
 
 const fmtTime = (t) => {
   if (!t) return '—';
@@ -38,9 +46,9 @@ const fmtTime = (t) => {
 
 const deriveStatus = (item) => {
   const isSunday = dayjs(item.date).day() === 0;
-  const hasIn  = !!item.in;
+  const hasIn = !!item.in;
   const hasOut = !!item.out;
-  const hrs    = Number(item.hours) || 0;
+  const hrs = Number(item.hours) || 0;
   if (!hasIn || !hasOut || hrs <= 0) return 'absent';
   if (isSunday) return 'overtime';
   if (hrs >= OVERTIME_HOURS) return 'overtime';
@@ -50,18 +58,39 @@ const deriveStatus = (item) => {
 
 export default function DTRScreen({ route }) {
   const { employee } = route.params;
-  const [mode, setMode]           = useState('week');
-  const [anchor, setAnchor]       = useState(dayjs());
-  const [data, setData]           = useState(null);
-  const [loading, setLoading]     = useState(true);
+
+  const [mode, setMode] = useState('week');
+  const [anchor, setAnchor] = useState(dayjs());
+  // Custom range state (used only when mode === 'range')
+  const [range, setRange] = useState({
+    start: dayjs().startOf('month'),
+    end: dayjs(),
+  });
+
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+
+  const [pickerOpen, setPickerOpen] = useState(false);       // week/month single-date
+  const [rangePickerOpen, setRangePickerOpen] = useState(false); // range
 
   const load = useCallback(
     (force = false) => {
       if (!force) setLoading(true);
-      const fn = mode === 'week'
-        ? getDTRWeek(employee.employee_number, anchor.format('YYYY-MM-DD'), { force })
-        : getDTRMonth(employee.employee_number, anchor.year(), anchor.month() + 1, { force });
+
+      let fn;
+      if (mode === 'week') {
+        fn = getDTRWeek(employee.employee_number, anchor.format('YYYY-MM-DD'), { force });
+      } else if (mode === 'month') {
+        fn = getDTRMonth(employee.employee_number, anchor.year(), anchor.month() + 1, { force });
+      } else {
+        fn = getDTRRange(
+          employee.employee_number,
+          range.start.format('YYYY-MM-DD'),
+          range.end.format('YYYY-MM-DD'),
+          { force },
+        );
+      }
 
       return fn
         .then(setData)
@@ -71,18 +100,67 @@ export default function DTRScreen({ route }) {
           setRefreshing(false);
         });
     },
-    [mode, anchor, employee.employee_number]
+    [mode, anchor, range, employee.employee_number],
   );
 
-  useEffect(() => { load(false); }, [load]);
+  useEffect(() => {
+    load(false);
+  }, [load]);
 
   const onRefresh = () => {
     setRefreshing(true);
     load(true);
   };
 
-  const shift = (delta) =>
+  const shift = (delta) => {
+    if (mode === 'range') {
+      // Shift the whole range by its own length (day-wise)
+      const days = range.end.diff(range.start, 'day') + 1;
+      setRange({
+        start: range.start.add(delta * days, 'day'),
+        end: range.end.add(delta * days, 'day'),
+      });
+      return;
+    }
     setAnchor((a) => (mode === 'week' ? a.add(delta, 'week') : a.add(delta, 'month')));
+  };
+
+  // ── Picker confirm handlers ──────────────────────────────
+  const onConfirmSingleDate = (params) => {
+    setPickerOpen(false);
+    if (!params?.date) return;
+    const picked = dayjs(params.date);
+    setAnchor(
+      mode === 'week'
+        ? picked.subtract(picked.day(), 'day')
+        : picked.startOf('month'),
+    );
+  };
+
+  const onConfirmRange = ({ startDate, endDate }) => {
+    setRangePickerOpen(false);
+    if (!startDate || !endDate) return;
+    setRange({
+      start: dayjs(startDate),
+      end: dayjs(endDate),
+    });
+  };
+
+  const openPicker = () => {
+    if (mode === 'range') setRangePickerOpen(true);
+    else setPickerOpen(true);
+  };
+
+  // ── Range label ─────────────────────────────────────────
+  const rangeLabel = (() => {
+    if (mode === 'week') {
+      return `${startOfSundayWeek(anchor).format('MMM D, YYYY')} – ${endOfSundayWeek(anchor).format('MMM D, YYYY')}`;
+    }
+    if (mode === 'month') {
+      return `${anchor.startOf('month').format('MMM D, YYYY')} – ${anchor.endOf('month').format('MMM D, YYYY')}`;
+    }
+    return `${range.start.format('MMM D, YYYY')} – ${range.end.format('MMM D, YYYY')}`;
+  })();
 
   const renderTable = () => {
     if (loading || !data) return null;
@@ -191,19 +269,57 @@ export default function DTRScreen({ route }) {
             buttons={[
               { value: 'week',  label: 'Weekly',  icon: 'calendar-week' },
               { value: 'month', label: 'Monthly', icon: 'calendar-month' },
+              { value: 'range', label: 'Range',   icon: 'calendar-range' },
             ]}
             style={{ marginHorizontal: 12 }}
           />
 
           <View style={styles.navRow}>
-            <Button icon="chevron-left" onPress={() => shift(-1)}>Prev</Button>
-            <Text variant="titleMedium" style={styles.rangeLabel}>
-              {mode === 'week'
-                ? `${startOfSundayWeek(anchor).format('MMM D, YYYY')} – ${endOfSundayWeek(anchor).format('MMM D, YYYY')}`
-                : `${anchor.startOf('month').format('MMM D, YYYY')} – ${anchor.endOf('month').format('MMM D, YYYY')}`}
-            </Text>
-            <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
+            <Button icon="chevron-left" onPress={() => shift(-1)}>
+              Prev
+            </Button>
+
+            <Pressable
+              onPress={openPicker}
+              style={styles.pickerButton}
+              accessibilityRole="button"
+              accessibilityLabel="Pick a date range"
+            >
+              <Text style={styles.rangeLabel}>{rangeLabel}</Text>
+              <IconButton icon="calendar" size={18} style={{ margin: 0 }} />
+            </Pressable>
+
+            <Button icon="chevron-right" onPress={() => shift(1)}>
+              Next
+            </Button>
           </View>
+
+          {/* Single-date modal (week / month) */}
+          <DatePickerModal
+            locale="en"
+            mode="single"
+            visible={pickerOpen}
+            onDismiss={() => setPickerOpen(false)}
+            date={anchor.toDate()}
+            onConfirm={onConfirmSingleDate}
+            saveLabel="Go"
+            label={mode === 'week' ? 'Pick any day in the week' : 'Pick any day in the month'}
+          />
+
+          {/* Range modal (range) */}
+          <DatePickerModal
+            locale="en"
+            mode="range"
+            visible={rangePickerOpen}
+            onDismiss={() => setRangePickerOpen(false)}
+            startDate={range.start.toDate()}
+            endDate={range.end.toDate()}
+            onConfirm={onConfirmRange}
+            saveLabel="Go"
+            label="Select start and end date"
+            startLabel="From"
+            endLabel="To"
+          />
 
           {loading && <ActivityIndicator style={{ margin: 24 }} />}
 
@@ -236,33 +352,22 @@ const styles = StyleSheet.create({
     marginHorizontal: 4,
     paddingVertical: 8,
   },
-  rangeLabel: { flex: 1, textAlign: 'center', fontSize: 13 },
-
-  tableWrap: {
-    marginHorizontal: 12,
-    marginBottom: 12,
+  pickerButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  row: {
-    borderLeftWidth: 4,
-  },
+  rangeLabel: { textAlign: 'center', fontSize: 13 },
 
-  // Column widths (unchanged — keep alignment)
+  tableWrap: { marginHorizontal: 12, marginBottom: 12 },
+  row: { borderLeftWidth: 4 },
+
   colDate: { flex: 2 },
-  colIn:   { flex: 1.4 },
-  colOut:  { flex: 1.4 },
-  colHrs:  { flex: 1 },
+  colIn: { flex: 1.4 },
+  colOut: { flex: 1.4 },
+  colHrs: { flex: 1 },
 
-  // Center titles inside their column
-  centerTitle: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-
-  // Center cell content; for numeric cells (Hrs) this still works because
-  // we removed the `numeric` prop from the Hrs column so it behaves like
-  // the others and can be centered uniformly.
-  centerCell: {
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  centerTitle: { justifyContent: 'center', alignItems: 'center' },
+  centerCell:  { justifyContent: 'center', alignItems: 'center' },
 });

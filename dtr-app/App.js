@@ -4,12 +4,13 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { PaperProvider, MD3LightTheme } from 'react-native-paper';
 import EmployeePickerScreen from './screens/EmployeePickerScreen';
 import DTRScreen from './screens/DTRScreen';
-
 import dayjs from 'dayjs';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
 import isoWeek from 'dayjs/plugin/isoWeek';
 dayjs.extend(weekOfYear);
 dayjs.extend(isoWeek);
+import { en, registerTranslation } from 'react-native-paper-dates';
+registerTranslation('en', en);
 
 const Stack = createNativeStackNavigator();
 
