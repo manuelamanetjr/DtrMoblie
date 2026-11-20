@@ -15,10 +15,8 @@ import { DatePickerModal } from 'react-native-paper-dates';
 import dayjs from 'dayjs';
 import customParseFormat from 'dayjs/plugin/customParseFormat';
 import { getDTRWeek, getDTRMonth, getDTRRange } from '../api';
-import * as XLSX from 'xlsx';
-import { File, Paths } from 'expo-file-system';
+import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-// ✅ FIX: StorageAccessFramework lives in the legacy module
 import * as FileSystemLegacy from 'expo-file-system/legacy';
 
 dayjs.extend(customParseFormat);
@@ -61,36 +59,80 @@ const deriveStatus = (item) => {
   return 'undertime';
 };
 
-// ── Excel builder ───────────────────────────────────────────
-function buildExportWorkbook(days, employee, range) {
-  const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
-  const header = ['DATE', 'IN', 'OUT', 'DATE', 'IN', 'OUT', 'DATE', 'IN', 'OUT'];
-  const rows = [];
+// ── PDF HTML Generator ──────────────────────────────────────
+function generatePdfHtml(days, employee) {
+  const sortedDays = [...days].sort((a, b) => a.date.localeCompare(b.date));
+  
+  // Exact 47 rows per column, 3 columns per page
+  const ROWS_PER_COL = 47;
+  const COLS_PER_PAGE = 3;
+  const ITEMS_PER_PAGE = ROWS_PER_COL * COLS_PER_PAGE;
+  const totalPages = Math.ceil(sortedDays.length / ITEMS_PER_PAGE);
+  
+  let html = `
+    <html>
+      <head>
+        <style>
+          @page { margin: 15px; }
+          body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; margin: 0; }
+          h1 { font-size: 14px; margin-bottom: 15px; text-transform: uppercase; }
+          .page { display: flex; justify-content: space-between; page-break-after: always; }
+          .page:last-child { page-break-after: auto; }
+          .column { width: 32%; }
+          table { border-collapse: collapse; width: 100%; }
+          th, td { border: 1px solid #000; padding: 2px 4px; text-align: left; font-size: 11px; }
+          th { font-weight: bold; text-transform: uppercase; }
+        </style>
+      </head>
+      <body>
+        <h1>${employee.last.toUpperCase()}, ${employee.first}</h1>
+  `;
 
-  for (let i = 0; i < sorted.length; i += 3) {
-    const chunk = sorted.slice(i, i + 3);
-    const row = [];
-    for (const d of chunk) {
-      row.push(dayjs(d.date).format('DD-MMM-YY'));
-      row.push(d.in ? d.in : '');
-      row.push(d.out ? d.out : '');
+  for (let p = 0; p < totalPages; p++) {
+    html += `<div class="page">`;
+    
+    for (let c = 0; c < COLS_PER_PAGE; c++) {
+      const startIndex = (p * ITEMS_PER_PAGE) + (c * ROWS_PER_COL);
+      const endIndex = startIndex + ROWS_PER_COL;
+      const chunk = sortedDays.slice(startIndex, endIndex);
+
+      // If this column has no data (e.g., last page with fewer items), keep it empty to maintain layout
+      if (chunk.length === 0) {
+        html += `<div class="column"></div>`;
+        continue;
+      }
+
+      html += `
+        <div class="column">
+          <table>
+            <tr>
+              <th>DATE</th>
+              <th>IN</th>
+              <th>OUT</th>
+            </tr>
+      `;
+
+      chunk.forEach(d => {
+        html += `
+          <tr>
+            <td>${dayjs(d.date).format('DD-MMM-YY')}</td>
+            <td>${d.in || ''}</td>
+            <td>${d.out || ''}</td>
+          </tr>
+        `;
+      });
+
+      html += `
+          </table>
+        </div>
+      `;
     }
-    while (row.length < 9) row.push('');
-    rows.push(row);
+    
+    html += `</div>`;
   }
 
-  const aoa = [header, ...rows];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-
-  ws['!cols'] = [
-    { wch: 12 }, { wch: 10 }, { wch: 10 },
-    { wch: 12 }, { wch: 10 }, { wch: 10 },
-    { wch: 12 }, { wch: 10 }, { wch: 10 },
-  ];
-
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'DTR');
-  return wb;
+  html += `</body></html>`;
+  return html;
 }
 
 export default function DTRScreen({ route }) {
@@ -186,36 +228,39 @@ export default function DTRScreen({ route }) {
     else setPickerOpen(true);
   };
 
-  // ── Excel Generation Helper ───────────────────────────────
-  const generateExcelFile = () => {
+  // ── Generate PDF as Base64 ────────────────────────────────
+  const generatePdfBase64 = async () => {
     if (!data?.days?.length) {
       Alert.alert('Nothing to export', 'No DTR data for this range.');
       return null;
     }
-    const wb = buildExportWorkbook(data.days, employee, data.range);
-    const wbout = XLSX.write(wb, { type: 'base64', bookType: 'xlsx' });
-    
+
+    const html = generatePdfHtml(data.days, employee);
+    const { base64 } = await Print.printToFileAsync({ html, base64: true });
+
     const safeName = `${employee.last}_${employee.first}_${data.range.start}_to_${data.range.end}`
       .replace(/[^a-z0-9_\-]/gi, '_');
-      
-    const file = new File(Paths.document, `${safeName}.xlsx`);
-    file.write(wbout, { encoding: 'base64' });
-    
-    return file;
+
+    return { base64, fileName: `${safeName}.pdf` };
   };
 
   // ── Share Handler ─────────────────────────────────────────
   const onShare = async () => {
     try {
       setExporting(true);
-      const file = generateExcelFile();
-      if (!file) return;
+      const pdf = await generatePdfBase64();
+      if (!pdf) return;
+
+      const tempUri = `${FileSystemLegacy.cacheDirectory}${pdf.fileName}`;
+      await FileSystemLegacy.writeAsStringAsync(tempUri, pdf.base64, {
+        encoding: FileSystemLegacy.EncodingType.Base64,
+      });
 
       if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(file.uri, {
-          mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        await Sharing.shareAsync(tempUri, {
+          mimeType: 'application/pdf',
           dialogTitle: 'Share DTR',
-          UTI: 'com.microsoft.excel.xlsx',
+          UTI: 'com.adobe.pdf',
         });
       } else {
         Alert.alert('Error', 'Sharing is not available on this device.');
@@ -228,53 +273,39 @@ export default function DTRScreen({ route }) {
     }
   };
 
-  // ── Download Handler (Uses legacy SAF) ────────────────────
+  // ── Download Handler (SAF) ────────────────────────────────
   const onDownload = async () => {
     if (Platform.OS !== 'android') {
-      Alert.alert(
-        'Not Supported',
-        'Direct download is only available on Android. Use the Share button to save the file on iOS.'
-      );
+      Alert.alert('Not Supported', 'Direct download is only available on Android. Use Share on iOS.');
       return;
     }
 
     try {
       setExporting(true);
-      const file = generateExcelFile();
-      if (!file) return;
+      const pdf = await generatePdfBase64();
+      if (!pdf) return;
 
       const SAF = FileSystemLegacy.StorageAccessFramework;
 
-      // 1. Ask user for a directory (Shows system folder picker)
       const permissions = await SAF.requestDirectoryPermissionsAsync(
         SAF.getUriForDirectoryInRoot('Download')
       );
 
-      if (!permissions.granted) {
-        return;
-      }
+      if (!permissions.granted) return;
 
-      // 2. Create the file in the chosen directory
-      const mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
       const fileUri = await SAF.createFileAsync(
         permissions.directoryUri,
-        file.name,
-        mimeType
+        pdf.fileName,
+        'application/pdf'
       );
 
-      // 3. Read the generated base64 content from the temp file
-      const base64Content = await file.base64();
-
-      // 4. Write the content to the chosen destination
-      await SAF.writeAsStringAsync(fileUri, base64Content, {
+      await SAF.writeAsStringAsync(fileUri, pdf.base64, {
         encoding: FileSystemLegacy.EncodingType.Base64,
       });
 
-      Alert.alert('Success', 'File saved successfully.');
+      Alert.alert('Success', 'PDF saved successfully.');
     } catch (err) {
-      if (err?.message?.includes('canceled')) {
-        return;
-      }
+      if (err?.message?.includes('canceled')) return;
       console.warn('[Download]', err);
       Alert.alert('Download failed', err?.message ?? 'Unknown error');
     } finally {
@@ -398,7 +429,6 @@ export default function DTRScreen({ route }) {
             <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
           </View>
 
-          {/* ── Action Buttons (range mode only) ────────────── */}
           {mode === 'range' && (
             <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 4, marginBottom: 4, gap: 8 }}>
               <Button
@@ -409,7 +439,7 @@ export default function DTRScreen({ route }) {
                 disabled={exporting || loading || !data}
                 style={{ flex: 1 }}
               >
-                Share
+                Share PDF
               </Button>
               <Button
                 mode="contained"
@@ -419,7 +449,7 @@ export default function DTRScreen({ route }) {
                 disabled={exporting || loading || !data}
                 style={{ flex: 1 }}
               >
-                Download
+                Download PDF
               </Button>
             </View>
           )}
