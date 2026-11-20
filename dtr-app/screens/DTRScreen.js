@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { View, FlatList, StyleSheet, RefreshControl, Pressable, Alert, Platform } from 'react-native';
+import { View, ScrollView, StyleSheet, RefreshControl, Pressable, Alert, Platform } from 'react-native';
 import {
   SegmentedButtons,
   Button,
@@ -7,7 +7,6 @@ import {
   Text,
   ActivityIndicator,
   DataTable,
-  Chip,
   Divider,
   IconButton,
 } from 'react-native-paper';
@@ -28,15 +27,14 @@ const STATUS_COLOR = {
   complete: '#2e7d32',
   overtime: '#1565c0',
   undertime: '#ef6c00',
-  absent: '#9e9e9e',
+  absent: '#d32f2f',
 };
 const STATUS_BG = {
   complete: '#e8f5e9',
   overtime: '#e3f2fd',
   undertime: '#fff3e0',
-  absent: '#f5f5f5',
+  absent: '#ffebee',
 };
-const LEGEND_ORDER = ['complete', 'overtime', 'undertime', 'absent'];
 
 const startOfSundayWeek = (d) => d.subtract(d.day(), 'day');
 const endOfSundayWeek = (d) => d.add(6 - d.day(), 'day');
@@ -48,22 +46,55 @@ const fmtTime = (t) => {
 };
 
 const deriveStatus = (item) => {
-  const isSunday = dayjs(item.date).day() === 0;
+  const itemDate = dayjs(item.date);
+  const today = dayjs().startOf('day');
+  
+  // 1. If the date is strictly in the future, leave it blank
+  if (itemDate.isAfter(today, 'day')) {
+    return null;
+  }
+
+  const isSunday = itemDate.day() === 0;
   const hasIn = !!item.in;
   const hasOut = !!item.out;
   const hrs = Number(item.hours) || 0;
-  if (!hasIn || !hasOut || hrs <= 0) return 'absent';
+  
+  // 2. No punches
+  if (!hasIn || !hasOut || hrs <= 0) {
+    return isSunday ? null : 'absent';
+  }
+  
+  // 3. Has punches
   if (isSunday) return 'overtime';
   if (hrs >= OVERTIME_HOURS) return 'overtime';
   if (hrs >= STANDARD_HOURS) return 'complete';
   return 'undertime';
 };
 
+// Calculate regular hours and overtime based on 3:00 PM shift end
+const getHours = (item) => {
+  let reg = Number(item.hours) || 0;
+  let ot = 0;
+  if (item.out) {
+    const inT = dayjs(`2000-01-01 ${item.in}`);
+    const outT = dayjs(`2000-01-01 ${item.out}`);
+    const shiftEnd = dayjs('2000-01-01 15:00:00');
+    
+    if (inT.isValid() && outT.isValid() && outT.isAfter(shiftEnd)) {
+      const otStart = inT.isAfter(shiftEnd) ? inT : shiftEnd;
+      ot = outT.diff(otStart, 'hour', true);
+      reg = reg - ot;
+    }
+  }
+  return {
+    reg: Math.max(0, Math.round(reg * 100) / 100),
+    ot: Math.round(ot * 100) / 100,
+  };
+};
+
 // ── PDF HTML Generator ──────────────────────────────────────
 function generatePdfHtml(days, employee) {
   const sortedDays = [...days].sort((a, b) => a.date.localeCompare(b.date));
-  
-  // Exact 47 rows per column, 3 columns per page
   const ROWS_PER_COL = 47;
   const COLS_PER_PAGE = 3;
   const ITEMS_PER_PAGE = ROWS_PER_COL * COLS_PER_PAGE;
@@ -75,17 +106,24 @@ function generatePdfHtml(days, employee) {
         <style>
           @page { margin: 15px; }
           body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; margin: 0; }
-          h1 { font-size: 14px; margin-bottom: 15px; text-transform: uppercase; }
+          .header-container { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px; }
+          h1 { font-size: 14px; margin: 0; text-transform: uppercase; }
+          .date-generated { font-size: 11px; }
           .page { display: flex; justify-content: space-between; page-break-after: always; }
           .page:last-child { page-break-after: auto; }
           .column { width: 32%; }
           table { border-collapse: collapse; width: 100%; }
           th, td { border: 1px solid #000; padding: 2px 4px; text-align: left; font-size: 11px; }
           th { font-weight: bold; text-transform: uppercase; }
+          .signatures { margin-top: 40px; page-break-inside: avoid; }
+          .sig-line { margin-bottom: 20px; }
         </style>
       </head>
       <body>
-        <h1>${employee.last.toUpperCase()}, ${employee.first}</h1>
+        <div class="header-container">
+          <h1>${employee.last.toUpperCase()}, ${employee.first}</h1>
+          <div class="date-generated">Generated on: ${dayjs().format('MMM D, YYYY')}</div>
+        </div>
   `;
 
   for (let p = 0; p < totalPages; p++) {
@@ -96,7 +134,6 @@ function generatePdfHtml(days, employee) {
       const endIndex = startIndex + ROWS_PER_COL;
       const chunk = sortedDays.slice(startIndex, endIndex);
 
-      // If this column has no data (e.g., last page with fewer items), keep it empty to maintain layout
       if (chunk.length === 0) {
         html += `<div class="column"></div>`;
         continue;
@@ -105,11 +142,7 @@ function generatePdfHtml(days, employee) {
       html += `
         <div class="column">
           <table>
-            <tr>
-              <th>DATE</th>
-              <th>IN</th>
-              <th>OUT</th>
-            </tr>
+            <tr><th>DATE</th><th>IN</th><th>OUT</th></tr>
       `;
 
       chunk.forEach(d => {
@@ -122,13 +155,19 @@ function generatePdfHtml(days, employee) {
         `;
       });
 
-      html += `
-          </table>
-        </div>
-      `;
+      html += `</table></div>`;
     }
     
     html += `</div>`;
+
+    if (p === totalPages - 1) {
+      html += `
+        <div class="signatures">
+          <div class="sig-line">Prepared By: _________________</div>
+          <div class="sig-line">Approved By: _________________</div>
+        </div>
+      `;
+    }
   }
 
   html += `</body></html>`;
@@ -228,7 +267,7 @@ export default function DTRScreen({ route }) {
     else setPickerOpen(true);
   };
 
-  // ── Generate PDF as Base64 ────────────────────────────────
+  // ── PDF Generation ────────────────────────────────────────
   const generatePdfBase64 = async () => {
     if (!data?.days?.length) {
       Alert.alert('Nothing to export', 'No DTR data for this range.');
@@ -273,7 +312,7 @@ export default function DTRScreen({ route }) {
     }
   };
 
-  // ── Download Handler (SAF) ────────────────────────────────
+  // ── Download Handler ──────────────────────────────────────
   const onDownload = async () => {
     if (Platform.OS !== 'android') {
       Alert.alert('Not Supported', 'Direct download is only available on Android. Use Share on iOS.');
@@ -323,180 +362,185 @@ export default function DTRScreen({ route }) {
     return `${range.start.format('MMM D, YYYY')} – ${range.end.format('MMM D, YYYY')}`;
   })();
 
-  const renderTable = () => {
-    if (loading || !data) return null;
-    return (
-      <View style={styles.tableWrap}>
-        <DataTable>
+  // Calculate Totals for Summary Card
+  let totalReg = 0;
+  let totalOt = 0;
+  if (data?.days) {
+    data.days.forEach(day => {
+      const { reg, ot } = getHours(day);
+      totalReg += reg;
+      totalOt += ot;
+    });
+  }
+
+  return (
+    <ScrollView
+      style={{ flex: 1 }}
+      stickyHeaderIndices={[1]} // Makes the 2nd child (Table Header) sticky
+      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+    >
+      {/* Child 0: Top Controls */}
+      <View>
+        <Card style={{ margin: 12 }}>
+          <Card.Title
+            title={`${employee.last.toUpperCase()}, ${employee.first}`}
+            subtitle={`#${employee.employee_number}`}
+          />
+        </Card>
+
+        <SegmentedButtons
+          value={mode}
+          onValueChange={setMode}
+          buttons={[
+            { value: 'week',  label: 'Weekly',  icon: 'calendar-week' },
+            { value: 'month', label: 'Monthly', icon: 'calendar-month' },
+            { value: 'range', label: 'Range',   icon: 'calendar-range' },
+          ]}
+          style={{ marginHorizontal: 12 }}
+        />
+
+        <View style={styles.navRow}>
+          <Button icon="chevron-left" onPress={() => shift(-1)}>Prev</Button>
+
+          <Pressable
+            onPress={openPicker}
+            style={styles.pickerButton}
+            accessibilityRole="button"
+            accessibilityLabel="Pick a date range"
+          >
+            <Text style={styles.rangeLabel}>{rangeLabel}</Text>
+            <IconButton icon="calendar" size={18} style={{ margin: 0 }} />
+          </Pressable>
+
+          <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
+        </View>
+
+        {mode === 'range' && (
+          <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 4, marginBottom: 4, gap: 8 }}>
+            <Button
+              mode="outlined"
+              icon="share-variant"
+              onPress={onShare}
+              loading={exporting}
+              disabled={exporting || loading || !data}
+              style={{ flex: 1 }}
+            >
+              Share PDF
+            </Button>
+            <Button
+              mode="contained"
+              icon="download"
+              onPress={onDownload}
+              loading={exporting}
+              disabled={exporting || loading || !data}
+              style={{ flex: 1 }}
+            >
+              Download PDF
+            </Button>
+          </View>
+        )}
+
+        <DatePickerModal
+          locale="en"
+          mode="single"
+          visible={pickerOpen}
+          onDismiss={() => setPickerOpen(false)}
+          date={anchor.toDate()}
+          onConfirm={onConfirmSingleDate}
+          saveLabel="Go"
+          label={mode === 'week' ? 'Pick any day in the week' : 'Pick any day in the month'}
+        />
+
+        <DatePickerModal
+          locale="en"
+          mode="range"
+          visible={rangePickerOpen}
+          onDismiss={() => setRangePickerOpen(false)}
+          startDate={range.start.toDate()}
+          endDate={range.end.toDate()}
+          onConfirm={onConfirmRange}
+          saveLabel="Go"
+          label="Select start and end date"
+          startLabel="From"
+          endLabel="To"
+        />
+
+        {loading && <ActivityIndicator style={{ margin: 24 }} />}
+
+        {!loading && data && (
+          <Card style={{ margin: 12 }}>
+            <Card.Content>
+              <Text variant="labelMedium">TOTAL HOURS</Text>
+              <Text variant="displaySmall" style={{ fontWeight: '700' }}>{data.total_hours}</Text>
+              <View style={{ flexDirection: 'row', gap: 16, marginTop: 4 }}>
+                <Text variant="bodySmall" style={{ color: '#2e7d32' }}>Reg: {Math.round(totalReg * 100) / 100}</Text>
+                <Text variant="bodySmall" style={{ color: '#1565c0' }}>OT: {Math.round(totalOt * 100) / 100}</Text>
+              </View>
+              <Text variant="bodySmall" style={{ marginTop: 8 }}>
+                {data.range.start} to {data.range.end}
+              </Text>
+            </Card.Content>
+          </Card>
+        )}
+      </View>
+
+      {/* Child 1: Sticky Table Header */}
+      {data && !loading && (
+        <View style={styles.stickyHeader}>
           <DataTable.Header>
             <DataTable.Title style={[styles.colDate, styles.centerTitle]}>Date</DataTable.Title>
             <DataTable.Title style={[styles.colIn, styles.centerTitle]}>In</DataTable.Title>
             <DataTable.Title style={[styles.colOut, styles.centerTitle]}>Out</DataTable.Title>
-            <DataTable.Title style={[styles.colHrs, styles.centerTitle]}>Hrs</DataTable.Title>
+            <DataTable.Title style={[styles.colReg, styles.centerTitle]}>Reg</DataTable.Title>
+            <DataTable.Title style={[styles.colOt, styles.centerTitle]}>OT</DataTable.Title>
           </DataTable.Header>
-
-          {data.days.map((item) => {
-            const status = deriveStatus(item);
-            return (
-              <DataTable.Row
-                key={item.date}
-                style={[
-                  styles.row,
-                  {
-                    backgroundColor: STATUS_BG[status],
-                    borderLeftColor: STATUS_COLOR[status],
-                  },
-                ]}
-              >
-                <DataTable.Cell style={[styles.colDate, styles.centerCell]}>
-                  <View style={{ alignItems: 'center' }}>
-                    <Text>{dayjs(item.date).format('MMM D ddd')}</Text>
-                    <Text style={{ fontSize: 10, color: STATUS_COLOR[status], fontWeight: '600' }}>
-                      {status.toUpperCase()}
-                    </Text>
-                  </View>
-                </DataTable.Cell>
-                <DataTable.Cell style={[styles.colIn, styles.centerCell]}>{fmtTime(item.in)}</DataTable.Cell>
-                <DataTable.Cell style={[styles.colOut, styles.centerCell]}>{fmtTime(item.out)}</DataTable.Cell>
-                <DataTable.Cell style={[styles.colHrs, styles.centerCell]}>
-                  {item.hours > 0 ? item.hours : '—'}
-                </DataTable.Cell>
-              </DataTable.Row>
-            );
-          })}
-        </DataTable>
-
-        <View style={{ padding: 12 }}>
-          <Divider />
-          <Text style={{ marginTop: 12, marginBottom: 6, fontSize: 12, color: '#666' }}>LEGEND</Text>
-          <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
-            {LEGEND_ORDER.map((s) => (
-              <Chip
-                key={s}
-                compact
-                textStyle={{ color: '#fff', fontSize: 11 }}
-                style={{ backgroundColor: STATUS_COLOR[s] }}
-              >
-                {s.toUpperCase()}
-              </Chip>
-            ))}
-          </View>
         </View>
-      </View>
-    );
-  };
+      )}
 
-  return (
-    <FlatList
-      style={{ flex: 1 }}
-      data={[null]}
-      keyExtractor={() => 'top'}
-      renderItem={() => null}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      ListHeaderComponent={
-        <>
-          <Card style={{ margin: 12 }}>
-            <Card.Title
-              title={`${employee.last.toUpperCase()}, ${employee.first}`}
-              subtitle={`#${employee.employee_number}`}
-            />
-          </Card>
+      {/* Child 2: Table Rows */}
+      {data && !loading && (
+        <View style={styles.tableWrap}>
+          <DataTable>
+            {data.days.map((item) => {
+              const status = deriveStatus(item);
+              const { reg, ot } = getHours(item);
 
-          <SegmentedButtons
-            value={mode}
-            onValueChange={setMode}
-            buttons={[
-              { value: 'week',  label: 'Weekly',  icon: 'calendar-week' },
-              { value: 'month', label: 'Monthly', icon: 'calendar-month' },
-              { value: 'range', label: 'Range',   icon: 'calendar-range' },
-            ]}
-            style={{ marginHorizontal: 12 }}
-          />
-
-          <View style={styles.navRow}>
-            <Button icon="chevron-left" onPress={() => shift(-1)}>Prev</Button>
-
-            <Pressable
-              onPress={openPicker}
-              style={styles.pickerButton}
-              accessibilityRole="button"
-              accessibilityLabel="Pick a date range"
-            >
-              <Text style={styles.rangeLabel}>{rangeLabel}</Text>
-              <IconButton icon="calendar" size={18} style={{ margin: 0 }} />
-            </Pressable>
-
-            <Button icon="chevron-right" onPress={() => shift(1)}>Next</Button>
-          </View>
-
-          {mode === 'range' && (
-            <View style={{ flexDirection: 'row', marginHorizontal: 12, marginTop: 4, marginBottom: 4, gap: 8 }}>
-              <Button
-                mode="outlined"
-                icon="share-variant"
-                onPress={onShare}
-                loading={exporting}
-                disabled={exporting || loading || !data}
-                style={{ flex: 1 }}
-              >
-                Share PDF
-              </Button>
-              <Button
-                mode="contained"
-                icon="download"
-                onPress={onDownload}
-                loading={exporting}
-                disabled={exporting || loading || !data}
-                style={{ flex: 1 }}
-              >
-                Download PDF
-              </Button>
-            </View>
-          )}
-
-          <DatePickerModal
-            locale="en"
-            mode="single"
-            visible={pickerOpen}
-            onDismiss={() => setPickerOpen(false)}
-            date={anchor.toDate()}
-            onConfirm={onConfirmSingleDate}
-            saveLabel="Go"
-            label={mode === 'week' ? 'Pick any day in the week' : 'Pick any day in the month'}
-          />
-
-          <DatePickerModal
-            locale="en"
-            mode="range"
-            visible={rangePickerOpen}
-            onDismiss={() => setRangePickerOpen(false)}
-            startDate={range.start.toDate()}
-            endDate={range.end.toDate()}
-            onConfirm={onConfirmRange}
-            saveLabel="Go"
-            label="Select start and end date"
-            startLabel="From"
-            endLabel="To"
-          />
-
-          {loading && <ActivityIndicator style={{ margin: 24 }} />}
-
-          {!loading && data && (
-            <Card style={{ margin: 12 }}>
-              <Card.Content>
-                <Text variant="labelMedium">TOTAL HOURS</Text>
-                <Text variant="displaySmall" style={{ fontWeight: '700' }}>{data.total_hours}</Text>
-                <Text variant="bodySmall" style={{ marginTop: 4 }}>
-                  {data.range.start} to {data.range.end}
-                </Text>
-              </Card.Content>
-            </Card>
-          )}
-
-          {renderTable()}
-        </>
-      }
-    />
+              return (
+                <DataTable.Row
+                  key={item.date}
+                  style={[
+                    styles.row,
+                    {
+                      backgroundColor: status ? STATUS_BG[status] : '#fff',
+                      borderLeftColor: status ? STATUS_COLOR[status] : 'transparent',
+                    },
+                  ]}
+                >
+                  <DataTable.Cell style={[styles.colDate, styles.centerCell]}>
+                    <View style={{ alignItems: 'center' }}>
+                      <Text>{dayjs(item.date).format('MMM D ddd')}</Text>
+                      {status && (
+                        <Text style={{ fontSize: 10, color: STATUS_COLOR[status], fontWeight: '600' }}>
+                          {status.toUpperCase()}
+                        </Text>
+                      )}
+                    </View>
+                  </DataTable.Cell>
+                  <DataTable.Cell style={[styles.colIn, styles.centerCell]}>{fmtTime(item.in)}</DataTable.Cell>
+                  <DataTable.Cell style={[styles.colOut, styles.centerCell]}>{fmtTime(item.out)}</DataTable.Cell>
+                  <DataTable.Cell style={[styles.colReg, styles.centerCell]}>
+                    {reg > 0 ? reg : '—'}
+                  </DataTable.Cell>
+                  <DataTable.Cell style={[styles.colOt, styles.centerCell]}>
+                    {ot > 1 ? ot : '—'}
+                  </DataTable.Cell>
+                </DataTable.Row>
+              );
+            })}
+          </DataTable>
+        </View>
+      )}
+    </ScrollView>
   );
 }
 
@@ -516,13 +560,24 @@ const styles = StyleSheet.create({
   },
   rangeLabel: { textAlign: 'center', fontSize: 13 },
 
-  tableWrap: { marginHorizontal: 12, marginBottom: 12 },
+  stickyHeader: {
+    backgroundColor: '#fff',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    zIndex: 10,
+  },
+
+  tableWrap: { marginHorizontal: 12, marginBottom: 40 },
   row: { borderLeftWidth: 4 },
 
   colDate: { flex: 2 },
-  colIn: { flex: 1.4 },
-  colOut: { flex: 1.4 },
-  colHrs: { flex: 1 },
+  colIn: { flex: 1.3 },
+  colOut: { flex: 1.3 },
+  colReg: { flex: 1 },
+  colOt: { flex: 1 },
 
   centerTitle: { justifyContent: 'center', alignItems: 'center' },
   centerCell:  { justifyContent: 'center', alignItems: 'center' },
