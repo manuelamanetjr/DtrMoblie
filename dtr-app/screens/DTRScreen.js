@@ -94,58 +94,96 @@ const getHours = (item) => {
 
 // ── PDF HTML Generator ──────────────────────────────────────
 function generatePdfHtml(days, employee) {
-  const sortedDays = [...days].sort((a, b) => a.date.localeCompare(b.date));
+  // 1. Filter out dates that have neither IN nor OUT
+  const validDays = days.filter(d => d.in || d.out);
+  const sortedDays = [...validDays].sort((a, b) => a.date.localeCompare(b.date));
+
   const ROWS_PER_COL = 47;
-  const COLS_PER_PAGE = 3;
-  const ITEMS_PER_PAGE = ROWS_PER_COL * COLS_PER_PAGE;
-  const totalPages = Math.ceil(sortedDays.length / ITEMS_PER_PAGE);
+  const MAX_COLS_PER_PAGE = 3;
+  const ITEMS_PER_PAGE = ROWS_PER_COL * MAX_COLS_PER_PAGE; // 141
   
+  const totalPages = Math.ceil(sortedDays.length / ITEMS_PER_PAGE) || 1;
+
   let html = `
     <html>
       <head>
         <style>
           @page { margin: 15px; }
-          body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; margin: 0; }
-          .header-container { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 15px; }
+          body { font-family: Helvetica, Arial, sans-serif; font-size: 11px; margin: 0; padding: 0; }
+          
+          .page {
+            display: flex;
+            flex-direction: column;
+            min-height: 97vh; /* Fills page but prevents overflow clipping */
+            page-break-after: always;
+            box-sizing: border-box;
+          }
+          .page:last-child {
+            page-break-after: auto;
+          }
+          
+          .header-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            margin-bottom: 15px;
+          }
           h1 { font-size: 14px; margin: 0; text-transform: uppercase; }
           .date-generated { font-size: 11px; }
-          .page { display: flex; justify-content: space-between; page-break-after: always; }
-          .page:last-child { page-break-after: auto; }
-          .column { width: 32%; }
+          
+          .columns-wrapper {
+            display: flex;
+            flex-direction: row;
+            justify-content: flex-start;
+            gap: 15px;
+            flex: 1; /* Pushes signatures to the bottom */
+          }
+          
+          .column {
+            width: 32%; /* Fixed width: stays left-aligned, no stretching */
+          }
+          
           table { border-collapse: collapse; width: 100%; }
           th, td { border: 1px solid #000; padding: 2px 4px; text-align: left; font-size: 11px; }
           th { font-weight: bold; text-transform: uppercase; }
-          .signatures { margin-top: 40px; page-break-inside: avoid; }
-          .sig-line { margin-bottom: 20px; }
+          
+          .signatures {
+            margin-top: 30px;
+            padding-bottom: 10px;
+            page-break-inside: avoid;
+          }
+          .sig-line { margin-bottom: 20px; font-size: 12px; }
         </style>
       </head>
       <body>
-        <div class="header-container">
-          <h1>${employee.last.toUpperCase()}, ${employee.first}</h1>
-          <div class="date-generated">Generated on: ${dayjs().format('MMM D, YYYY')}</div>
-        </div>
   `;
 
   for (let p = 0; p < totalPages; p++) {
+    const pageStart = p * ITEMS_PER_PAGE;
+    const pageItems = sortedDays.slice(pageStart, pageStart + ITEMS_PER_PAGE);
+
+    let colsNeeded = Math.ceil(pageItems.length / ROWS_PER_COL);
+    if (colsNeeded === 0) colsNeeded = 1;
+
     html += `<div class="page">`;
     
-    for (let c = 0; c < COLS_PER_PAGE; c++) {
-      const startIndex = (p * ITEMS_PER_PAGE) + (c * ROWS_PER_COL);
-      const endIndex = startIndex + ROWS_PER_COL;
-      const chunk = sortedDays.slice(startIndex, endIndex);
+    html += `
+      <div class="header-container">
+        <h1>${employee.last.toUpperCase()}, ${employee.first}</h1>
+        <div class="date-generated">Generated on: ${dayjs().format('MMM D, YYYY')}</div>
+      </div>
+      <div class="columns-wrapper">
+    `;
 
-      if (chunk.length === 0) {
-        html += `<div class="column"></div>`;
-        continue;
-      }
+    for (let c = 0; c < colsNeeded; c++) {
+      const colStart = c * ROWS_PER_COL;
+      const colItems = pageItems.slice(colStart, colStart + ROWS_PER_COL);
 
-      html += `
-        <div class="column">
-          <table>
-            <tr><th>DATE</th><th>IN</th><th>OUT</th></tr>
-      `;
+      html += `<div class="column">
+        <table>
+          <tr><th>DATE</th><th>IN</th><th>OUT</th></tr>`;
 
-      chunk.forEach(d => {
+      colItems.forEach(d => {
         html += `
           <tr>
             <td>${dayjs(d.date).format('DD-MMM-YY')}</td>
@@ -157,8 +195,8 @@ function generatePdfHtml(days, employee) {
 
       html += `</table></div>`;
     }
-    
-    html += `</div>`;
+
+    html += `</div>`; // close columns-wrapper
 
     if (p === totalPages - 1) {
       html += `
@@ -168,6 +206,8 @@ function generatePdfHtml(days, employee) {
         </div>
       `;
     }
+
+    html += `</div>`; // close page
   }
 
   html += `</body></html>`;
@@ -376,7 +416,7 @@ export default function DTRScreen({ route }) {
   return (
     <ScrollView
       style={{ flex: 1 }}
-      stickyHeaderIndices={[1]} // Makes the 2nd child (Table Header) sticky
+      stickyHeaderIndices={[1]}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
       {/* Child 0: Top Controls */}
